@@ -1,6 +1,6 @@
 {
   "name": "hivepulse",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "In-memory job processing for Node.js and TypeScript with FIFO scheduling and configurable concurrency.",
   "type": "module",
   "main": "./dist/index.js",

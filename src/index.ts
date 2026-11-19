@@ -5,4 +5,4 @@ export type { Job } from './core/Job.js';
 export type { AddJobOptions, HivePulseOptions, JobHandler, JobStatus } from './core/types.js';
 
 /** The current First Buzz release version. */
-export const VERSION = '0.1.0' as const;
+export const VERSION = '0.1.1' as const;

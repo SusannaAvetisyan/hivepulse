@@ -6,10 +6,10 @@ Register a handler, submit a job, and let HivePulse manage execution. Jobs start
 in FIFO order with a configurable concurrency limit, and each job retains its
 status, result, and error for lookup.
 
-**v0.1.0 · First Buzz**
+**v0.1.1 · First Buzz**
 
 - Synchronous and asynchronous handlers
-- FIFO scheduling with immediate reuse of available execution slots
+- FIFO scheduling with bounded concurrency and periodic event-loop yields
 - Job snapshots with results, errors, timestamps, and attempt counts
 - `onIdle()` for waiting until queued and active work finishes
 - ESM exports and TypeScript declarations
@@ -21,8 +21,11 @@ not persist jobs: queued work and stored results are lost when the process exits
 
 Requires **Node.js 22.12 or later**. HivePulse is ESM-only.
 
-This version is available for local development; the package is currently marked
-private. To use a local checkout, first build it:
+```sh
+npm install hivepulse
+```
+
+To use a local checkout instead, first build it:
 
 ```sh
 # In the hivepulse-lib directory
@@ -64,7 +67,9 @@ console.log(job?.result); // 55
 
 Save the example as an `.mjs` file, or use a project with `"type": "module"`.
 `add()` returns the job ID before a handler starts. FIFO determines start order;
-completion order depends on how long each handler takes.
+completion order depends on how long each handler takes. Large bursts periodically
+yield to the event loop so timers and I/O can progress; free slots may therefore
+be filled on a later event-loop turn.
 
 ## API
 
@@ -84,6 +89,7 @@ and can return a value or a promise. Handlers remain registered for the lifetime
 of the engine and cannot be replaced or removed.
 
 Registering the same type twice throws `HandlerAlreadyRegisteredError`.
+A non-function handler throws `TypeError` without registering the type.
 
 For TypeScript, declare the handler's input type:
 
@@ -176,7 +182,10 @@ if (job?.status === 'failed') {
 ## Scope and limitations
 
 - Jobs run on the same Node.js event loop. Concurrency allows asynchronous work
-  to overlap; it does not provide CPU parallelism.
+  to overlap; it does not provide CPU parallelism. Periodic scheduler yields reduce
+  scheduler-induced starvation but cannot prevent a handler or application code
+  from blocking the event loop. Use worker threads or separate processes for
+  CPU-heavy work.
 - All jobs, including completed and failed jobs, remain in memory for the
   engine's lifetime. There is no automatic cleanup or persistence.
 - Lookup is by ID. Filtering and `getJobs()` are outside v0.1.0.

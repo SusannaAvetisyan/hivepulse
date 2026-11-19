@@ -1,11 +1,51 @@
 import { describe, expect, it } from 'vitest';
-import { HandlerAlreadyRegisteredError, HivePulse } from '../src/index.js';
+import { HandlerAlreadyRegisteredError, HivePulse, type JobHandler } from '../src/index.js';
 
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 
 describe('release requirements', () => {
   it.each([0, -1, 1.5, NaN, Infinity])('rejects invalid concurrency %s', concurrency => {
     expect(() => new HivePulse({ concurrency })).toThrow(RangeError);
+  });
+
+  it.each([undefined, null, 42, 'handler', {}])('rejects non-function handler %j without reserving the type', async handler => {
+    const engine = new HivePulse();
+    expect(() => engine.register('work', handler as unknown as JobHandler)).toThrow(TypeError);
+    engine.register('work', () => 'valid');
+    const id = engine.add({ type: 'work', context: null });
+    await engine.onIdle();
+    expect(engine.getJob(id)?.result).toBe('valid');
+  });
+
+  it.each(['sync', 'async', 'throw'] as const)('yields during a burst of %s handlers while preserving FIFO', async mode => {
+    const engine = new HivePulse({ concurrency: 3 });
+    const order: number[] = [];
+    engine.register('work', (n: number) => {
+      order.push(n);
+      if (mode === 'throw') throw new Error('expected');
+      return mode === 'async' ? Promise.resolve(n) : n;
+    });
+    const turn = new Promise<number>(resolve => setImmediate(() => resolve(order.length)));
+    for (let n = 0; n < 1000; n++) engine.add({ type: 'work', context: n });
+    const startedAtYield = await turn;
+    expect(startedAtYield).toBeGreaterThan(0);
+    expect(startedAtYield).toBeLessThan(1000);
+    await engine.onIdle();
+    expect(order).toEqual(Array.from({ length: 1000 }, (_, n) => n));
+  });
+
+  it('yields even when handlers continuously submit more work', async () => {
+    const engine = new HivePulse();
+    let starts = 0;
+    engine.register('work', () => {
+      starts++;
+      if (starts < 1000) engine.add({ type: 'work', context: null });
+    });
+    const turn = new Promise<number>(resolve => setImmediate(() => resolve(starts)));
+    engine.add({ type: 'work', context: null });
+    expect(await turn).toBeLessThan(1000);
+    await engine.onIdle();
+    expect(starts).toBe(1000);
   });
 
   it('rejects duplicate handlers and preserves the original', async () => {

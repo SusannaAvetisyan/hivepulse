@@ -1,9 +1,13 @@
+import { setImmediate } from 'node:timers';
 import { v4 as uuidv4 } from 'uuid';
 import { HandlerAlreadyRegisteredError } from '../errors/HandlerAlreadyRegisteredError.js';
 import { HandlerNotRegisteredError } from '../errors/HandlerNotRegisteredError.js';
 
 import { JobStatus, type Job } from './Job.js';
 import type { AddJobOptions, HivePulseOptions, JobHandler } from './types.js';
+
+// Bound uninterrupted starts so fast handlers cannot monopolize the microtask queue.
+const STARTS_BEFORE_YIELD = 64;
 
 /** In-memory FIFO job engine with bounded concurrency. */
 export class HivePulse {
@@ -12,6 +16,8 @@ export class HivePulse {
   private readonly jobs: Map<string, Job>;
   private readonly queue: Job[];
   private activeCount: number;
+  private schedulePending = false;
+  private startsSinceYield = 0;
   private readonly idleWaiters = new Set<() => void>();
 
   constructor(options: HivePulseOptions = {}) {
@@ -39,6 +45,9 @@ export class HivePulse {
     if (this.handlers.has(_type)) {
       throw new HandlerAlreadyRegisteredError(_type);
     }
+    if (typeof _handler !== 'function') {
+      throw new TypeError('HivePulse handler must be a function');
+    }
     // The heterogeneous registry erases each handler's context type at this boundary.
     this.handlers.set(_type, context => _handler(context as TContext));
   }
@@ -63,7 +72,7 @@ export class HivePulse {
     this.jobs.set(job.id, job);
 
     this.queue.push(job);
-    queueMicrotask(() => this.schedule())
+    this.requestSchedule();
 
     return job.id;
   }
@@ -82,11 +91,31 @@ export class HivePulse {
     return new Promise(resolve => this.idleWaiters.add(resolve));
   }
 
+  private requestSchedule(): void {
+    if (this.schedulePending || this.queue.length === 0 || this.activeCount >= this.concurrency) {
+      return;
+    }
+    this.schedulePending = true;
+    const run = () => {
+      this.schedulePending = false;
+      this.schedule();
+    };
+    if (this.startsSinceYield >= STARTS_BEFORE_YIELD) {
+      setImmediate(() => {
+        this.startsSinceYield = 0;
+        run();
+      });
+    } else {
+      queueMicrotask(run);
+    }
+  }
+
   private schedule(): void {
     if(this.activeCount < this.concurrency)
     {
       const jobsToExecute = [];
-      for(let i=0; i< this.concurrency-this.activeCount; i++)
+      const capacity = Math.min(this.concurrency - this.activeCount, STARTS_BEFORE_YIELD - this.startsSinceYield);
+      for(let i=0; i< capacity; i++)
       {
         const job = this.queue.shift();
         if(!job)
@@ -101,8 +130,10 @@ export class HivePulse {
       }
 
       this.activeCount += jobsToExecute.length;
+      this.startsSinceYield += jobsToExecute.length;
 
-       for (const job of jobsToExecute) void this.execute(job);
+      for (const job of jobsToExecute) void this.execute(job);
+      this.requestSchedule();
     }
   }
 
@@ -133,7 +164,7 @@ export class HivePulse {
     {
       _job.finishedAt = new Date();
       this.activeCount -= 1;
-      queueMicrotask(() => this.schedule());
+      this.requestSchedule();
       if (this.activeCount === 0 && this.queue.length === 0) {
         for (const resolve of this.idleWaiters) resolve();
         this.idleWaiters.clear();
